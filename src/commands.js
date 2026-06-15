@@ -2,7 +2,7 @@ const { REST, Routes, SlashCommandBuilder, EmbedBuilder } = require('discord.js'
 const axios = require('axios');
 
 const PHPVMS = process.env.PHPVMS_URL;
-const API_KEY = process.env.DBASIC_API_KEY;
+const API_KEY = fbu_dbasic_2026_xK9mP3qR;
 
 const api = axios.create({
   baseURL: `${PHPVMS}/api`,
