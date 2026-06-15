@@ -185,4 +185,9 @@ app.post('/webhook/news', async (req, res) => {
 
 const PORT = process.env.PORT || 3000;
 app.listen(PORT, () => console.log(`🌐 Webhook server port ${PORT}`));
+// Anti-sleep Render
+const https = require('https');
+setInterval(() => {
+  https.get('https://fbu-bot.onrender.com', () => {});
+}, 10 * 60 * 1000);
 client.login(process.env.DISCORD_TOKEN);
