@@ -10,6 +10,12 @@ const api = axios.create({
   timeout: 8000,
 });
 
+const dbapi = axios.create({
+  baseURL: `${PHPVMS}/dbapi`,
+  headers: { 'X-API-Key': API_KEY, 'Accept': 'application/json' },
+  timeout: 8000,
+});
+
 const commands = [
   new SlashCommandBuilder()
     .setName('pirep')
@@ -71,23 +77,30 @@ async function handleCommand(interaction) {
           .setTimestamp();
         pireps.forEach(p => {
           const dur = p.flight_time ? `${Math.floor(p.flight_time/60)}h${String(p.flight_time%60).padStart(2,'0')}` : '—';
-          embed.addFields({ name: `FBU${p.flight_number} · ${p.dpt_airport_id} → ${p.arr_airport_id}`, value: `👨‍✈️ ${p.pilot?.name ?? '—'} · ⏱ ${dur} · 📊 ${p.score ?? '—'}% · 📉 ${p.landing_rate ?? '—'} ft/min` });
+          embed.addFields({
+            name: `FBU${p.flight_number} · ${p.dpt_airport_id} → ${p.arr_airport_id}`,
+            value: `👨‍✈️ ${p.pilot?.name ?? '—'} · ⏱ ${dur} · 📊 ${p.score ?? '—'}% · 📉 ${p.landing_rate ?? '—'} ft/min`
+          });
         });
         await interaction.editReply({ embeds: [embed] });
         break;
       }
 
       case 'roster': {
-        const { data } = await api.get('/pilots?limit=15&status=active');
-        const pilots = data?.data ?? [];
+        const { data } = await dbapi.get('/roster');
+        const pilots = data?.data ?? data ?? [];
         const embed = new EmbedBuilder()
           .setColor('#0D1B3E')
           .setTitle('👨‍✈️ Roster — French Bee Virtual')
-          .setDescription(`**${pilots.length}** pilotes actifs`)
+          .setDescription(`**${Array.isArray(pilots) ? pilots.length : '?'}** pilotes`)
           .setFooter({ text: 'French Bee Virtual · ICAO FBU' })
           .setTimestamp();
-        pilots.slice(0, 10).forEach(p => {
-          embed.addFields({ name: `${p.pilot_id} · ${p.name}`, value: `${p.rank?.name ?? '—'} · ✈ ${p.flights ?? 0} vols · ⏱ ${Math.floor((p.flight_time ?? 0)/60)}h`, inline: true });
+        (Array.isArray(pilots) ? pilots : []).slice(0, 10).forEach(p => {
+          embed.addFields({
+            name: `${p.pilot_id ?? '—'} · ${p.name ?? '—'}`,
+            value: `${p.rank?.name ?? p.rank ?? '—'} · ✈ ${p.flights ?? 0} vols · ⏱ ${Math.floor((p.flight_time ?? 0)/60)}h`,
+            inline: true
+          });
         });
         await interaction.editReply({ embeds: [embed] });
         break;
@@ -95,29 +108,35 @@ async function handleCommand(interaction) {
 
       case 'flights': {
         const dest = interaction.options.getString('destination');
-        const url  = dest ? `/flights?arr_airport=${dest}` : '/flights?dpt_airport=LFPO&limit=8';
+        const url  = dest ? `/flights?arr_airport=${dest}&limit=8` : '/flights?dpt_airport=LFPO&limit=8';
         const { data } = await api.get(url);
         const flights = data?.data ?? [];
         const embed = new EmbedBuilder()
           .setColor('#0099CC')
-          .setTitle(`🗺 Vols disponibles${dest ? ` → ${dest}` : ' depuis LFPO'}`)
-          .setFooter({ text: 'French Bee Virtual · ICAO FBU · newhorisons.com/flights' })
+          .setTitle(`🗺 Vols${dest ? ` → ${dest.toUpperCase()}` : ' depuis LFPO'}`)
+          .setFooter({ text: 'newhorisons.com/flights' })
           .setTimestamp();
         if (!flights.length) { embed.setDescription('Aucun vol trouvé.'); }
-        else { flights.slice(0,8).forEach(f => { const dur = f.flight_time ? `${Math.floor(f.flight_time/60)}h${String(f.flight_time%60).padStart(2,'0')}` : '—'; embed.addFields({ name: `FBU${f.flight_number} · ${f.dpt_airport_id} → ${f.arr_airport_id}`, value: `⏱ ${dur} · 📏 ${f.distance ?? '—'} nm`, inline: true }); }); }
+        else {
+          flights.slice(0,8).forEach(f => {
+            const dur = f.flight_time ? `${Math.floor(f.flight_time/60)}h${String(f.flight_time%60).padStart(2,'0')}` : '—';
+            embed.addFields({ name: `FBU${f.flight_number} · ${f.dpt_airport_id} → ${f.arr_airport_id}`, value: `⏱ ${dur} · 📏 ${f.distance ?? '—'} nm`, inline: true });
+          });
+        }
         await interaction.editReply({ embeds: [embed] });
         break;
       }
 
       case 'stats': {
-        const { data } = await api.get('/stats');
+        const { data } = await dbapi.get('/stats');
+        const s = data?.data ?? data ?? {};
         const embed = new EmbedBuilder()
           .setColor('#FF6B35')
           .setTitle('📊 Statistiques — French Bee Virtual')
           .addFields(
-            { name: '👨‍✈️ Pilotes', value: String(data?.pilots ?? '—'), inline: true },
-            { name: '✈ PIREPs', value: String(data?.flights ?? '—'), inline: true },
-            { name: '⏱ Heures volées', value: data?.flight_hours ? `${Math.floor(data.flight_hours)}h` : '—', inline: true },
+            { name: '👨‍✈️ Pilotes', value: String(s.pilots ?? s.pilot_count ?? '—'), inline: true },
+            { name: '✈ PIREPs', value: String(s.flights ?? s.pirep_count ?? '—'), inline: true },
+            { name: '⏱ Heures volées', value: s.flight_time ? `${Math.floor(s.flight_time/60)}h` : (s.flight_hours ? `${Math.floor(s.flight_hours)}h` : '—'), inline: true },
           )
           .setFooter({ text: 'French Bee Virtual · ICAO FBU' })
           .setTimestamp();
@@ -126,10 +145,12 @@ async function handleCommand(interaction) {
       }
 
       case 'pilote': {
-        const pilotId = interaction.options.getString('id').toUpperCase();
-        const { data } = await api.get(`/pilots?pilot_id=${pilotId}`);
-        const pilot = data?.data?.[0];
-        if (!pilot) { await interaction.editReply(`Pilote ${pilotId} introuvable.`); return; }
+        const input = interaction.options.getString('id');
+        // Chercher par pilot_id ou par ID numérique
+        const numId = input.replace(/[^0-9]/g, '');
+        const { data } = await api.get(`/users/${numId || input}`);
+        const pilot = data?.data ?? data;
+        if (!pilot || !pilot.name) { await interaction.editReply(`Pilote \`${input}\` introuvable.`); return; }
         const embed = new EmbedBuilder()
           .setColor('#0099CC')
           .setTitle(`👨‍✈️ ${pilot.name}`)
@@ -169,7 +190,7 @@ async function handleCommand(interaction) {
             { name: '✈ ICAO', value: 'FBU', inline: true },
             { name: '🛫 Hub', value: 'Paris-Orly (LFPO)', inline: true },
             { name: '🛩 Flotte', value: 'A350-900 / ULR / A350-1000', inline: true },
-            { name: '🌍 Destinations', value: 'La Réunion, Martinique, Guadeloupe, San Francisco, Singapour, Tahiti, Honolulu', inline: false },
+            { name: '🌍 Destinations', value: 'La Réunion, Martinique, Guadeloupe, San Francisco, Singapour, Tahiti, Honolulu' },
             { name: '🔗 Crew Center', value: 'https://newhorisons.com', inline: true },
             { name: '💬 Discord', value: 'https://discord.gg/VDmSYqC34W', inline: true },
           )
