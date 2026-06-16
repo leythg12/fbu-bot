@@ -102,3 +102,4 @@ setInterval(() => {
   https.get('https://fbu-bot.onrender.com', () => {});
 }, 10 * 60 * 1000);
 client.login(process.env.DISCORD_TOKEN);
+//active
