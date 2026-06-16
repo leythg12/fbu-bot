@@ -1,213 +1,181 @@
-const { REST, Routes, SlashCommandBuilder, EmbedBuilder } = require('discord.js');
-const axios = require('axios');
+const { REST, Routes, SlashCommandBuilder, EmbedBuilder, ActionRowBuilder, ButtonBuilder, ButtonStyle } = require('discord.js');
+const api     = require('./api');
+const embeds  = require('./embeds');
+const cfg     = require('./config');
+const { postRecruitmentPanel } = require('./recruitment');
 
-const PHPVMS = process.env.PHPVMS_URL;
-const API_KEY = process.env.DBASIC_API_KEY;
+const defs = [
+  new SlashCommandBuilder().setName('pirep').setDescription('Derniers PIREPs acceptés')
+    .addIntegerOption(o => o.setName('nombre').setDescription('Nombre (1-10)').setMinValue(1).setMaxValue(10)),
 
-const api = axios.create({
-  baseURL: `${PHPVMS}/api`,
-  headers: { 'X-API-Key': API_KEY, 'Accept': 'application/json' },
-  timeout: 8000,
-});
+  new SlashCommandBuilder().setName('roster').setDescription('Roster des pilotes actifs')
+    .addIntegerOption(o => o.setName('page').setDescription('Page').setMinValue(1)),
 
-const dbapi = axios.create({
-  baseURL: `${PHPVMS}/dbapi`,
-  headers: { 'X-API-Key': API_KEY, 'Accept': 'application/json' },
-  timeout: 8000,
-});
+  new SlashCommandBuilder().setName('pilote').setDescription('Infos sur un pilote')
+    .addIntegerOption(o => o.setName('id').setDescription('ID numérique (ex: 1)').setRequired(true)),
 
-const commands = [
-  new SlashCommandBuilder()
-    .setName('pirep')
-    .setDescription('Voir les derniers PIREPs French Bee Virtual')
-    .addIntegerOption(o => o.setName('count').setDescription('Nombre de PIREPs (1-10)').setMinValue(1).setMaxValue(10)),
-  new SlashCommandBuilder()
-    .setName('roster')
-    .setDescription('Voir le roster des pilotes FBU'),
-  new SlashCommandBuilder()
-    .setName('flights')
-    .setDescription('Voir les vols disponibles depuis LFPO')
-    .addStringOption(o => o.setName('destination').setDescription('Code ICAO destination (ex: FMEE)')),
-  new SlashCommandBuilder()
-    .setName('stats')
-    .setDescription('Statistiques de French Bee Virtual'),
-  new SlashCommandBuilder()
-    .setName('pilote')
-    .setDescription('Informations sur un pilote FBU')
-    .addStringOption(o => o.setName('id').setDescription('ID pilote (ex: FBU0001)').setRequired(true)),
-  new SlashCommandBuilder()
-    .setName('metar')
-    .setDescription('METAR d\'un aéroport')
+  new SlashCommandBuilder().setName('flights').setDescription('Vols disponibles')
+    .addStringOption(o => o.setName('destination').setDescription('Code ICAO (ex: FMEE)'))
+    .addStringOption(o => o.setName('depart').setDescription('Code ICAO départ (défaut: LFPO)')),
+
+  new SlashCommandBuilder().setName('stats').setDescription('Statistiques de French Bee Virtual'),
+
+  new SlashCommandBuilder().setName('metar').setDescription('METAR d\'un aéroport')
     .addStringOption(o => o.setName('icao').setDescription('Code ICAO (ex: LFPO)').setRequired(true)),
-  new SlashCommandBuilder()
-    .setName('fbu')
-    .setDescription('Informations sur French Bee Virtual'),
-  new SlashCommandBuilder()
-    .setName('panel')
-    .setDescription('Poster le panel de recrutement (Admin)'),
+
+  new SlashCommandBuilder().setName('vatsim').setDescription('Pilotes FBU connectés sur VATSIM en ce moment'),
+
+  new SlashCommandBuilder().setName('fbu').setDescription('Informations sur French Bee Virtual'),
+
+  new SlashCommandBuilder().setName('ma-position').setDescription('Voir ma position actuelle (depuis le crew center)')
+    .addIntegerOption(o => o.setName('id').setDescription('Ton ID pilote numérique').setRequired(true)),
+
+  new SlashCommandBuilder().setName('panel').setDescription('Poster le panel de recrutement [Admin]'),
+
+  new SlashCommandBuilder().setName('annonce').setDescription('Poster une annonce dans #annonces [Admin]')
+    .addStringOption(o => o.setName('titre').setDescription('Titre de l\'annonce').setRequired(true))
+    .addStringOption(o => o.setName('message').setDescription('Contenu de l\'annonce').setRequired(true))
+    .addBooleanOption(o => o.setName('everyone').setDescription('Mentionner @everyone ?')),
+
+  new SlashCommandBuilder().setName('aide').setDescription('Liste des commandes disponibles'),
 ].map(c => c.toJSON());
 
-async function loadCommands(client) {
+async function deployCommands() {
   const rest = new REST({ version: '10' }).setToken(process.env.DISCORD_TOKEN);
   try {
-    await rest.put(
-      Routes.applicationGuildCommands(process.env.DISCORD_CLIENT_ID, process.env.DISCORD_GUILD_ID),
-      { body: commands }
-    );
+    await rest.put(Routes.applicationGuildCommands(cfg.CLIENT_ID, cfg.GUILD_ID), { body: defs });
     console.log('✅ Slash commands déployées');
-  } catch (err) {
-    console.error('Erreur deploy commands:', err.message);
-  }
+  } catch (err) { console.error('Deploy commands error:', err.message); }
 }
 
-async function handleCommand(interaction) {
+async function handle(interaction, client) {
   await interaction.deferReply();
   try {
     switch (interaction.commandName) {
 
       case 'pirep': {
-        const count = interaction.options.getInteger('count') ?? 5;
-        const { data } = await api.get(`/pireps?limit=${count}&state=2`);
-        const pireps = data?.data ?? [];
-        if (!pireps.length) { await interaction.editReply('Aucun PIREP trouvé.'); return; }
-        const embed = new EmbedBuilder()
-          .setColor('#0099CC')
-          .setTitle('✈ Derniers PIREPs — French Bee Virtual')
-          .setFooter({ text: 'French Bee Virtual · ICAO FBU' })
-          .setTimestamp();
+        const n = interaction.options.getInteger('nombre') ?? 5;
+        const pireps = await api.getPireps(n);
+        if (!pireps.length) { await interaction.editReply('Aucun PIREP récent.'); return; }
+        const embed = new EmbedBuilder().setColor('#0099CC').setTitle(`✈ ${n} Derniers PIREPs — FBU`).setTimestamp().setFooter({ text: 'French Bee Virtual · ICAO FBU' });
         pireps.forEach(p => {
-          const dur = p.flight_time ? `${Math.floor(p.flight_time/60)}h${String(p.flight_time%60).padStart(2,'0')}` : '—';
-          embed.addFields({
-            name: `FBU${p.flight_number} · ${p.dpt_airport_id} → ${p.arr_airport_id}`,
-            value: `👨‍✈️ ${p.pilot?.name ?? '—'} · ⏱ ${dur} · 📊 ${p.score ?? '—'}% · 📉 ${p.landing_rate ?? '—'} ft/min`
-          });
+          embed.addFields({ name: `FBU${p.flight_number} · ${p.dpt_airport_id} → ${p.arr_airport_id}`, value: `👨‍✈️ ${p.pilot?.name ?? '—'} · ⏱ ${embeds.dur(p.flight_time)} · 📊 ${p.score ?? '—'}% · 📉 ${p.landing_rate ?? '—'} ft/min` });
         });
         await interaction.editReply({ embeds: [embed] });
         break;
       }
 
       case 'roster': {
-        const { data } = await dbapi.get('/roster');
-        const pilots = data?.data ?? data ?? [];
-        const embed = new EmbedBuilder()
-          .setColor('#0D1B3E')
-          .setTitle('👨‍✈️ Roster — French Bee Virtual')
-          .setDescription(`**${Array.isArray(pilots) ? pilots.length : '?'}** pilotes`)
-          .setFooter({ text: 'French Bee Virtual · ICAO FBU' })
-          .setTimestamp();
-        (Array.isArray(pilots) ? pilots : []).slice(0, 10).forEach(p => {
-          embed.addFields({
-            name: `${p.pilot_id ?? '—'} · ${p.name ?? '—'}`,
-            value: `${p.rank?.name ?? p.rank ?? '—'} · ✈ ${p.flights ?? 0} vols · ⏱ ${Math.floor((p.flight_time ?? 0)/60)}h`,
-            inline: true
-          });
-        });
+        const page = (interaction.options.getInteger('page') ?? 1) - 1;
+        const pilots = await api.getPilots(50);
+        const chunk  = pilots.slice(page * 10, page * 10 + 10);
+        if (!chunk.length) { await interaction.editReply('Aucun pilote trouvé sur cette page.'); return; }
+        const embed = new EmbedBuilder().setColor('#0D1B3E')
+          .setTitle(`👨‍✈️ Roster FBU — Page ${page+1}`)
+          .setDescription(`${pilots.length} pilotes actifs`)
+          .setTimestamp().setFooter({ text: 'French Bee Virtual · ICAO FBU' });
+        chunk.forEach(p => embed.addFields({ name: `${p.pilot_id} · ${p.name}`, value: `${p.rank?.name ?? '—'} · ✈ ${p.flights ?? 0} vols · ⏱ ${Math.floor((p.flight_time ?? 0)/60)}h · 📍 ${p.curr_airport_id ?? '—'}`, inline: true }));
+        await interaction.editReply({ embeds: [embed] });
+        break;
+      }
+
+      case 'pilote': {
+        const id = interaction.options.getInteger('id');
+        const pilot = await api.getPilot(id);
+        if (!pilot?.name) { await interaction.editReply(`Pilote ID \`${id}\` introuvable.`); return; }
+        await interaction.editReply({ embeds: [embeds.pilotEmbed(pilot)] });
+        break;
+      }
+
+      case 'ma-position': {
+        const id = interaction.options.getInteger('id');
+        const pilot = await api.getPilot(id);
+        if (!pilot?.name) { await interaction.editReply(`Pilote ID \`${id}\` introuvable.`); return; }
+        const embed = new EmbedBuilder().setColor('#0099CC')
+          .setTitle(`📍 Position de ${pilot.name}`)
+          .addFields(
+            { name: '📍 Position actuelle', value: pilot.curr_airport_id ?? '—', inline: true },
+            { name: '🏠 Hub',               value: pilot.home_airport_id ?? 'LFPO', inline: true },
+            { name: '🎖 Rang',              value: pilot.rank?.name ?? '—', inline: true },
+          )
+          .setFooter({ text: 'French Bee Virtual · newhorisons.com' }).setTimestamp();
         await interaction.editReply({ embeds: [embed] });
         break;
       }
 
       case 'flights': {
         const dest = interaction.options.getString('destination');
-        const url  = dest ? `/flights?arr_airport=${dest}&limit=8` : '/flights?dpt_airport=LFPO&limit=8';
-        const { data } = await api.get(url);
-        const flights = data?.data ?? [];
-        const embed = new EmbedBuilder()
-          .setColor('#0099CC')
-          .setTitle(`🗺 Vols${dest ? ` → ${dest.toUpperCase()}` : ' depuis LFPO'}`)
-          .setFooter({ text: 'newhorisons.com/flights' })
-          .setTimestamp();
+        const dep  = interaction.options.getString('depart') ?? 'LFPO';
+        const q    = dest ? `arr_airport=${dest.toUpperCase()}` : `dpt_airport=${dep.toUpperCase()}`;
+        const flights = await api.getFlights(q);
+        const embed = new EmbedBuilder().setColor('#0099CC')
+          .setTitle(dest ? `🗺 Vols → ${dest.toUpperCase()}` : `🗺 Vols depuis ${dep.toUpperCase()}`)
+          .setFooter({ text: 'newhorisons.com/flights' }).setTimestamp();
         if (!flights.length) { embed.setDescription('Aucun vol trouvé.'); }
-        else {
-          flights.slice(0,8).forEach(f => {
-            const dur = f.flight_time ? `${Math.floor(f.flight_time/60)}h${String(f.flight_time%60).padStart(2,'0')}` : '—';
-            embed.addFields({ name: `FBU${f.flight_number} · ${f.dpt_airport_id} → ${f.arr_airport_id}`, value: `⏱ ${dur} · 📏 ${f.distance ?? '—'} nm`, inline: true });
-          });
-        }
+        else { flights.forEach(f => { embed.addFields({ name: `FBU${f.flight_number} · ${f.dpt_airport_id} → ${f.arr_airport_id}`, value: `⏱ ${embeds.dur(f.flight_time)} · 📏 ${f.distance ?? '—'} nm`, inline: true }); }); }
         await interaction.editReply({ embeds: [embed] });
         break;
       }
 
       case 'stats': {
-        const { data } = await dbapi.get('/stats');
-        const s = data?.data ?? data ?? {};
-        const embed = new EmbedBuilder()
-          .setColor('#FF6B35')
-          .setTitle('📊 Statistiques — French Bee Virtual')
-          .addFields(
-            { name: '👨‍✈️ Pilotes', value: String(s.pilots ?? s.pilot_count ?? '—'), inline: true },
-            { name: '✈ PIREPs', value: String(s.flights ?? s.pirep_count ?? '—'), inline: true },
-            { name: '⏱ Heures volées', value: s.flight_time ? `${Math.floor(s.flight_time/60)}h` : (s.flight_hours ? `${Math.floor(s.flight_hours)}h` : '—'), inline: true },
-          )
-          .setFooter({ text: 'French Bee Virtual · ICAO FBU' })
-          .setTimestamp();
-        await interaction.editReply({ embeds: [embed] });
-        break;
-      }
-
-      case 'pilote': {
-        const input = interaction.options.getString('id');
-        // Chercher par pilot_id ou par ID numérique
-        const numId = input.replace(/[^0-9]/g, '');
-        const { data } = await api.get(`/users/${numId || input}`);
-        const pilot = data?.data ?? data;
-        if (!pilot || !pilot.name) { await interaction.editReply(`Pilote \`${input}\` introuvable.`); return; }
-        const embed = new EmbedBuilder()
-          .setColor('#0099CC')
-          .setTitle(`👨‍✈️ ${pilot.name}`)
-          .addFields(
-            { name: '🆔 ID', value: pilot.pilot_id ?? '—', inline: true },
-            { name: '🎖 Rang', value: pilot.rank?.name ?? '—', inline: true },
-            { name: '📍 Position', value: pilot.curr_airport_id ?? '—', inline: true },
-            { name: '✈ Vols', value: String(pilot.flights ?? 0), inline: true },
-            { name: '⏱ Heures', value: `${Math.floor((pilot.flight_time ?? 0)/60)}h`, inline: true },
-            { name: '📊 Score moyen', value: pilot.score ? `${pilot.score}%` : '—', inline: true },
-          )
-          .setFooter({ text: 'French Bee Virtual · ICAO FBU' })
-          .setTimestamp();
-        await interaction.editReply({ embeds: [embed] });
+        const s = await api.getStats();
+        if (!s) { await interaction.editReply('Stats non disponibles (service key manquante).'); return; }
+        await interaction.editReply({ embeds: [embeds.statsEmbed(s)] });
         break;
       }
 
       case 'metar': {
         const icao = interaction.options.getString('icao').toUpperCase();
-        const { data } = await axios.get(`https://metar.vatsim.net/metar.php?id=${icao}`, { timeout: 5000 });
-        const embed = new EmbedBuilder()
-          .setColor('#1B3A6B')
-          .setTitle(`🌤 METAR ${icao}`)
-          .setDescription(`\`\`\`${data || 'METAR non disponible'}\`\`\``)
-          .setFooter({ text: 'Source: VATSIM METAR' })
-          .setTimestamp();
-        await interaction.editReply({ embeds: [embed] });
+        const raw  = await api.getMetar(icao);
+        if (!raw) { await interaction.editReply(`METAR pour ${icao} non disponible.`); return; }
+        await interaction.editReply({ embeds: [embeds.metarEmbed(icao, raw)] });
+        break;
+      }
+
+      case 'vatsim': {
+        const flights = await api.getVatsimFlights();
+        await interaction.editReply({ embeds: [embeds.vatsimEmbed(flights)] });
         break;
       }
 
       case 'fbu': {
-        const embed = new EmbedBuilder()
-          .setColor('#0099CC')
-          .setTitle('🐝 French Bee Virtual')
-          .setDescription('La compagnie virtuelle qui recrée l\'expérience French Bee sur MSFS 2020 & 2024.')
-          .addFields(
-            { name: '✈ ICAO', value: 'FBU', inline: true },
-            { name: '🛫 Hub', value: 'Paris-Orly (LFPO)', inline: true },
-            { name: '🛩 Flotte', value: 'A350-900 / ULR / A350-1000', inline: true },
-            { name: '🌍 Destinations', value: 'La Réunion, Martinique, Guadeloupe, San Francisco, Singapour, Tahiti, Honolulu' },
-            { name: '🔗 Crew Center', value: 'https://newhorisons.com', inline: true },
-            { name: '💬 Discord', value: 'https://discord.gg/VDmSYqC34W', inline: true },
-          )
-          .setFooter({ text: 'French Bee Virtual · ICAO FBU · Paris-Orly' })
-          .setTimestamp();
-        await interaction.editReply({ embeds: [embed] });
+        await interaction.editReply({ embeds: [embeds.fbuEmbed()] });
         break;
       }
 
       case 'panel': {
-        if (!interaction.member.permissions.has('Administrator')) {
-          await interaction.editReply('❌ Réservé aux admins.');
-          return;
-        }
-        const { postRecruitmentPanel } = require('./recruitment');
+        if (!interaction.member.permissions.has('Administrator')) { await interaction.editReply('❌ Admins seulement.'); return; }
         await postRecruitmentPanel(interaction.channel);
         await interaction.editReply('✅ Panel posté !');
+        break;
+      }
+
+      case 'annonce': {
+        if (!interaction.member.permissions.has('Administrator')) { await interaction.editReply('❌ Admins seulement.'); return; }
+        const titre   = interaction.options.getString('titre');
+        const message = interaction.options.getString('message');
+        const everyone = interaction.options.getBoolean('everyone') ?? false;
+        const ch = client.channels.cache.get(cfg.CHANNELS.ANNOUNCEMENTS);
+        if (!ch) { await interaction.editReply('Canal #annonces introuvable.'); return; }
+        const embed = new EmbedBuilder().setColor('#0099CC').setTitle(`📢 ${titre}`)
+          .setDescription(message).setAuthor({ name: interaction.user.username })
+          .setFooter({ text: 'French Bee Virtual · ICAO FBU' }).setTimestamp();
+        await ch.send({ content: everyone ? '@everyone' : undefined, embeds: [embed] });
+        await interaction.editReply('✅ Annonce postée !');
+        break;
+      }
+
+      case 'aide': {
+        const embed = new EmbedBuilder().setColor('#0099CC').setTitle('🐝 Commandes French Bee Virtual')
+          .addFields(
+            { name: '✈ Opérations', value: '`/pirep` `/flights` `/stats` `/vatsim`', inline: false },
+            { name: '👨‍✈️ Pilotes',  value: '`/pilote` `/roster` `/ma-position`', inline: false },
+            { name: '🌤 Météo',     value: '`/metar`', inline: false },
+            { name: 'ℹ Infos',     value: '`/fbu` `/aide`', inline: false },
+            { name: '🔐 Admin',    value: '`/panel` `/annonce`', inline: false },
+          )
+          .setFooter({ text: `French Bee Virtual · ${cfg.CREW_CENTER}` }).setTimestamp();
+        await interaction.editReply({ embeds: [embed] });
         break;
       }
 
@@ -215,9 +183,9 @@ async function handleCommand(interaction) {
         await interaction.editReply('Commande inconnue.');
     }
   } catch (err) {
-    console.error(`Erreur commande ${interaction.commandName}:`, err.message);
-    await interaction.editReply('❌ Une erreur est survenue.').catch(() => {});
+    console.error(`Erreur /${interaction.commandName}:`, err.message);
+    await interaction.editReply('❌ Erreur. Réessaie dans quelques instants.').catch(() => {});
   }
 }
 
-module.exports = { loadCommands, handleCommand };
+module.exports = { deployCommands, handle };
