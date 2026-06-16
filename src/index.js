@@ -96,4 +96,9 @@ app.post('/webhook/user-registered',  (req, res) => { res.sendStatus(200); wh.ha
 
 const PORT = process.env.PORT || 3000;
 app.listen(PORT, () => console.log(`🌐 Webhook server on port ${PORT}`));
+// Anti-sleep Render
+const https = require('https');
+setInterval(() => {
+  https.get('https://fbu-bot.onrender.com', () => {});
+}, 10 * 60 * 1000);
 client.login(process.env.DISCORD_TOKEN);
